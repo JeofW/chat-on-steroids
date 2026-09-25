@@ -42,6 +42,45 @@ describe('browser bridge port config', () => {
   });
 });
 
+describe('Secure Tunnel connector isolation', () => {
+  const id = (char: string) => `tunnel_${char.repeat(32)}`;
+
+  it('rejects a duplicate Core/Plugins id atomically without printing the id', async () => {
+    const good = defaultConfig();
+    good.tunnel.tunnelId = id('a');
+    good.tunnel.pluginsTunnelId = id('b');
+    await saveConfig(good);
+    const before = await fs.readFile(path.join(dir, 'config.json'), 'utf8');
+
+    await expect(updateConfig(config => ({
+      ...config,
+      tunnel: { ...config.tunnel, pluginsTunnelId: config.tunnel.tunnelId }
+    }))).rejects.toThrow('Plugins cannot use the same Secure Tunnel ID as Core');
+
+    expect(await fs.readFile(path.join(dir, 'config.json'), 'utf8')).toBe(before);
+    expect((await loadConfig()).tunnel.pluginsTunnelId).toBe(id('b'));
+  });
+
+  it('loads a legacy duplicate Desktop id but rejects the permission change that would publish it', async () => {
+    const legacy = defaultConfig();
+    legacy.tunnel.tunnelId = id('c');
+    legacy.tunnel.desktopTunnelId = id('c');
+    legacy.capabilities.screen = false;
+    legacy.capabilities.control = false;
+    legacy.capabilities.clipboardRead = false;
+    legacy.capabilities.clipboardWrite = false;
+    await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify(legacy, null, 2), 'utf8');
+
+    const loaded = await loadConfig();
+    expect(loaded.tunnel.desktopTunnelId).toBe(id('c'));
+    await expect(updateConfig(config => ({
+      ...config,
+      capabilities: { ...config.capabilities, screen: true }
+    }))).rejects.toThrow('Desktop cannot use the same Secure Tunnel ID as Core');
+    expect((await loadConfig()).capabilities.screen).toBe(false);
+  });
+});
+
 describe('settings migration', () => {
   it('round-trips custom appearance and isolates malformed appearance from permissions', async () => {
     const { defaultAppearance } = await import('../src/shared/appearance.js');

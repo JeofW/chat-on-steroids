@@ -42,6 +42,7 @@ import {
 import { logError } from './logger.js';
 import { RESERVED_ROOT_NAMES } from './sandbox.js';
 import { capabilitiesForPlatform } from './platform.js';
+import { surfaceIsUseful, type SurfaceId } from './mcp/surfaces.js';
 
 export const browserBridgePortSchema = z.union([z.literal('auto'), z.literal(BROWSER_BRIDGE_PORTS)]);
 
@@ -644,6 +645,40 @@ export function effectiveCapabilities(
   return capped;
 }
 
+/**
+ * Returns the first Secure Tunnel collision among connectors that would actually be published.
+ *
+ * One OpenAI tunnel is one shared polling queue. Core, Desktop and Plugins serve different MCP
+ * catalogs, so two available connectors must never run on the same non-empty tunnel id. Core has
+ * priority, then Desktop, then Plugins. The ids themselves never appear in the result or error.
+ */
+export function openAiTunnelConflict(config: Config): { surface: SurfaceId; conflictsWith: SurfaceId } | null {
+  if (config.tunnel.kind !== 'openai') return null;
+  const caps = effectiveCapabilities(config);
+  const ids: Record<SurfaceId, string> = {
+    core: config.tunnel.tunnelId,
+    desktop: config.tunnel.desktopTunnelId,
+    plugins: config.tunnel.pluginsTunnelId ?? ''
+  };
+  const seen = new Map<string, SurfaceId>();
+  for (const surface of ['core', 'desktop', 'plugins'] as const) {
+    if (surface !== 'core' && !surfaceIsUseful(surface, caps)) continue;
+    const id = ids[surface]?.trim();
+    if (!id) continue;
+    const prior = seen.get(id);
+    if (prior) return { surface, conflictsWith: prior };
+    seen.set(id, surface);
+  }
+  return null;
+}
+
+function assertDistinctOpenAiTunnelIds(config: Config): void {
+  const conflict = openAiTunnelConflict(config);
+  if (!conflict) return;
+  const label = (surface: SurfaceId) => surface === 'core' ? 'Core' : surface === 'desktop' ? 'Desktop' : 'Plugins';
+  throw new Error(`${label(conflict.surface)} cannot use the same Secure Tunnel ID as ${label(conflict.conflictsWith)}. Create a separate tunnel for each connector.`);
+}
+
 async function persistConfig(parsed: Config): Promise<Config> {
   const tmp = `${configPath}.tmp`;
   await fs.mkdir(path.dirname(configPath), { recursive: true });
@@ -672,6 +707,11 @@ export function updateConfig(
     const previous = current;
     // Validate before reserving external resources. The optional publisher owns their rollback.
     const proposed = configSchema.parse(await update(previous));
+    // A Secure Tunnel id is a shared queue. Different MCP catalogs on one id race each other,
+    // producing intermittent UNKNOWN_TOOL responses. Reject a new conflict before any settings
+    // or profile/permission transition is committed; legacy conflicting files are handled at
+    // connection startup instead of being rewritten behind the user's back.
+    assertDistinctOpenAiTunnelIds(proposed);
     const persist = () => persistConfig(proposed);
     const next = await (publish ? publish(proposed, previous, persist) : persist());
     // Keep dependent durable retirement inside the same settings transaction;
