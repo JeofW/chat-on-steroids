@@ -11,6 +11,16 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## Unreleased
 
+## [2.1.15] — Jeof reliability maintenance build
+
+- Base the maintenance release on upstream `main` after 2.1.14, then carry the focused prompt-readback fix from PR #401 and managed Core enrollment fixes from PR #384.
+- Support the current ChatGPT shell's direct conversation mapping and arbitrary connector display names while confirming ownership only through opaque request IDs that also reached local MCP ingress.
+- Keep page-first request evidence pending until local admission instead of filing the first Core call under Unattributed activity.
+- Reject newly introduced duplicate Secure Tunnel IDs across available Core, Desktop and Plugins connectors, contain legacy conflicts at startup, and stop all affected optional clients before an ID swap can create a temporary shared queue.
+- Use `JeofW/chat-on-steroids` as the release, updater and companion-extension recovery channel while retaining the upstream app and connector names for compatibility.
+
+Reload the companion extension and refresh the affected CoS connectors in ChatGPT after updating.
+
 - Keep fresh background workers rendering while their editor hydrates, including pending initial navigation and exact document retirement.
 - Read live alternate-shell request metadata and public activity before history hydration; place recorded tools beside native prose without a reload.
 - Restore versioned response observers without duplicate active readers and recognize complete identity in native resume streams.

@@ -41,8 +41,8 @@ vi.mock('electron', () => ({
 }));
 vi.mock('../src/main/logger.js', () => ({ logInfo: () => undefined, logWarn: () => undefined }));
 
-const { APP_VERSION } = await import('../src/main/version.js');
-const { isNewer } = await import('../src/shared/types.js');
+const { APP_VERSION, RELEASE_REPOSITORY, extensionDownloadUrl } = await import('../src/main/version.js');
+const { isNewer, RELEASES_PAGE } = await import('../src/shared/types.js');
 const {
   applyStagedUpdate,
   checkForUpdates,
@@ -169,6 +169,16 @@ describe('which installations update themselves', () => {
     expect(asked).toEqual(['latest']);
     await applyStagedUpdate();
     expect(spawned).toEqual([]);
+  });
+});
+
+describe('maintenance release channel', () => {
+  it('uses the Jeof fork for releases and companion recovery', () => {
+    expect(RELEASE_REPOSITORY).toBe('JeofW/chat-on-steroids');
+    expect(RELEASES_PAGE).toBe('https://github.com/JeofW/chat-on-steroids/releases/latest');
+    expect(extensionDownloadUrl('2.1.15')).toBe(
+      'https://github.com/JeofW/chat-on-steroids/releases/download/v2.1.15/Chat-On-Steroids-Extension.zip'
+    );
   });
 });
 
