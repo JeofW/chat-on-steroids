@@ -246,6 +246,15 @@ async function harness(
   reply.set('register_document', () => ({ ok: true }));
   reply.set('status', () => ({ connected: true, paired: true, port: 8765, pending: 0 }));
   reply.set('events', () => ({ ok: true, pending: 0, durable: true }));
+  reply.set('correlate', message => ({ ok: true, data: {
+    conversationId: message.conversationId,
+    confirmed: Array.isArray(message.calls)
+      ? message.calls.map((call: Record<string, any>) => call.requestId).filter(Boolean)
+      : [],
+    pending: [],
+    conflicts: [],
+    complete: true
+  } }));
   reply.set('bind', () => ({ ok: true, bound: 0 }));
   reply.set('poll', () => ({ ok: true }));
   reply.set('closed', () => ({ ok: true }));
@@ -3937,7 +3946,7 @@ describe('the app-owned chronological stream', () => {
     section.setAttribute('data-clf-fiber-turn', '0');
     await replyFiber([{
       v: 21, index: 0, messageId: 'interim-native-X', tool: 'read', app: 'Chat On Steroids Core', answered: true,
-      conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+      requestId, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
     }], [{ turnId: 'interrupted-fold-page', conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', messages,
       calls: [{ messageId: 'interim-native-X', requestId, tool: 'read', order: 0, answered: true }], activities: [],
       thoughtNotifications: [{ messageId: thoughtId, kind: 'thought_notification' }] }]);
@@ -5287,9 +5296,9 @@ describe('the app-owned chronological stream', () => {
     blocks[1]!.setAttribute('data-clf-fiber', '1');
     const rows = (secondAnswered: boolean) => [
       { v: 21, index: 0, messageId: 'fiber-one', tool: 'read_file', path: '/Chat On Steroids Core/read_file',
-        app: 'Chat On Steroids Core', answered: true, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' },
+        app: 'Chat On Steroids Core', requestId: 'wfr-live-one', answered: true, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' },
       { v: 21, index: 1, messageId: 'fiber-two', tool: 'exec_command', path: '/Chat On Steroids Core/exec_command',
-        app: 'Chat On Steroids Core', answered: secondAnswered, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }
+        app: 'Chat On Steroids Core', requestId: 'wfr-live-two', answered: secondAnswered, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }
     ];
     const turn = (secondAnswered: boolean) => ({
       turnId: 'page-live-call-gap',
@@ -5314,11 +5323,15 @@ describe('the app-owned chronological stream', () => {
     expect(blocks[1]!.closest('[data-clf-native-hidden]')).not.toBeNull();
   });
 
-  it.each([
-    ['Chat On Steroids Plugins', true],
-    ['Chat On Steroids Backup', false]
-  ] as const)('suppresses only an answered exact supported connector block (%s)', async (app, hidden) => {
-    live = await harness(undefined, { activity: () => ({ ok: true, data: {
+  it.each(Array.from({ length: 12 }, (_, index) =>
+    `${String.fromCodePoint(0x600 + index)} ${index} ${String.fromCodePoint(0x1f900 + index)}`))
+  ('suppresses an answered locally confirmed connector block regardless of display name (%s)', async app => {
+    live = await harness(undefined, {
+      correlate: message => ({ ok: true, data: {
+        conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        confirmed: message.calls.map((call: any) => call.requestId)
+      } }),
+      activity: () => ({ ok: true, data: {
       entries: [], userAnchors: [{ seq: 0, time: 50, messageId: 'm-exact-block-owner' }], stream: [
         { seq: 1, time: 100, kind: 'turn_start', turnId: 'exact-block-owner' },
         { seq: 2, time: 110, kind: 'tool_call', turnId: 'exact-block-owner', callId: 'exact-block-call',
@@ -5329,13 +5342,14 @@ describe('the app-owned chronological stream', () => {
     const section = assistantTurn(live.document, 'exact-block-page', ['Native connector row']);
     const block = blocksOf(section)[0]!; section.setAttribute('data-clf-fiber-turn', '0'); block.setAttribute('data-clf-fiber', '0');
     await replyFiber([{ v: 21, index: 0, messageId: 'fiber-exact-block', tool: 'read_file',
-      path: `/${app}/read_file`, app, answered: true, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }], [{
+      path: `/${app}/read_file`, app, requestId: 'wfr-exact-block', answered: true,
+      conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }], [{
       turnId: 'exact-block-page', calls: [{ messageId: 'fiber-exact-block', tool: 'read_file', order: 0,
         answered: true, requestId: 'wfr-exact-block' }]
     }]);
     await live.hook.pullActivity(); live.hook.renderStreams();
     expect(overwriteRows(section, '[data-clf-call="exact-block-call"]')).toHaveLength(1);
-    expect(block.closest('[data-clf-native-hidden]') !== null).toBe(hidden);
+    expect(block.closest('[data-clf-native-hidden]')).not.toBeNull();
   });
 
   it.each([false, true])('hides result-only native duplicates only after mounted coverage for a shared request (same tool: %s)', async sameTool => {
@@ -6301,7 +6315,7 @@ describe('the app-owned chronological stream', () => {
     block.setAttribute('data-clf-fiber', '0');
     const bind = async (answered: boolean) => replyFiber([{
       v: 21, index: 0, messageId: 'fiber-moved-call', tool: 'read_file',
-      path: '/Chat On Steroids Core/read_file', app: 'Chat On Steroids Core', answered,
+      path: '/Chat On Steroids Core/read_file', app: 'Chat On Steroids Core', requestId: 'wfr-app-stream', answered,
       conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
     }], [{ turnId, calls: [{ messageId: 'fiber-moved-call', tool: 'read_file', order: 0,
       answered, requestId: 'wfr-app-stream' }] }]);
@@ -9805,6 +9819,7 @@ describe('evidence from the page context', () => {
         'localCount',
         'messageId',
         'path',
+        'requestId',
         'resource',
         'tool',
         'turnId'
@@ -9855,11 +9870,13 @@ describe('evidence from the page context', () => {
     await reply([], [
       {
         turnId: 'reused-page-turn',
-        calls: [{ messageId: 'old-call', tool: 'read', order: 0, answered: true }]
+        conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        calls: [{ messageId: 'old-call', requestId: 'request-old-call', tool: 'read', order: 0, answered: true }]
       },
       {
         turnId: 'reused-page-turn',
-        calls: [{ messageId: 'live-call', tool: 'agents', order: 0, answered: false }]
+        conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        calls: [{ messageId: 'live-call', requestId: 'request-live-call', tool: 'agents', order: 0, answered: false }]
       }
     ]);
     // refreshFiber queues the evidence; the normal observer tick is what journals the queue.
@@ -14352,6 +14369,90 @@ describe('the fresh chat the app opened', () => {
  * filled against a figure of its own would show a full bar and do nothing, or compact a
  * conversation that still looked half empty.
  */
+describe('per-message Core attachment', () => {
+  const activity = {
+    ok: true,
+    data: {
+      entries: [], stream: [], userAnchors: [], nextSince: 0, pendingTools: 0, job: null,
+      tokens: 0, context: null,
+      coreConnector: { connectorName: 'Chat On Steroids Core', connectorId: 'plugin_asdk_app_example' }
+    }
+  };
+
+  it('intercepts a trusted follow-up once, proves Core selection, then spends one Send click', async () => {
+    let sends = 0;
+    live = await harness(undefined, { activity: () => activity }, document => {
+      document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => { sends++; });
+    });
+    await live.hook.pullActivity();
+    const api = (live.window as any).CLF_DOM;
+    let selected = false, selects = 0;
+    api.connectorMentionSelected = () => selected;
+    api.selectConnectorMention = async () => { selects++; selected = true; return true; };
+    live.document.querySelector('#prompt-textarea')!.textContent = 'continue using Core on this task';
+
+    live.trustedClick(live.document.querySelector('[data-testid="send-button"]')!);
+    await settle(100);
+
+    expect(selects).toBe(1);
+    expect(sends).toBe(1);
+    expect(live.document.querySelector('.clf-connector-warning')).toBeNull();
+  });
+
+  it('fails closed when Core selection cannot be proved and preserves the draft', async () => {
+    let sends = 0;
+    live = await harness(undefined, { activity: () => activity }, document => {
+      document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => { sends++; });
+    });
+    await live.hook.pullActivity();
+    const api = (live.window as any).CLF_DOM;
+    api.connectorMentionSelected = () => false;
+    api.selectConnectorMention = async () => false;
+    const composer = live.document.querySelector('#prompt-textarea')!;
+    composer.textContent = 'do not lose this draft';
+
+    live.trustedClick(live.document.querySelector('[data-testid="send-button"]')!);
+    await settle(100);
+
+    expect(sends).toBe(0);
+    expect(composer.textContent).toBe('do not lose this draft');
+    expect(live.document.querySelector('.clf-connector-warning')?.textContent).toContain('draft was not sent');
+  });
+
+  it('does not auto-attach when the managed chat has no proven Core identity', async () => {
+    const nonCore = {
+      ...activity,
+      data: { ...activity.data, coreConnector: null }
+    };
+    live = await harness(undefined, { activity: () => nonCore });
+    await live.hook.pullActivity();
+    const api = (live.window as any).CLF_DOM;
+    const select = vi.fn(async () => true);
+    api.selectConnectorMention = select;
+    live.document.querySelector('#prompt-textarea')!.textContent = 'ordinary follow-up';
+
+    live.trustedClick(live.document.querySelector('[data-testid="send-button"]')!);
+    await settle();
+
+    expect(select).not.toHaveBeenCalled();
+  });
+
+  it('does not carry a proven Core identity into a different ChatGPT conversation', async () => {
+    live = await harness(undefined, { activity: () => activity });
+    await live.hook.pullActivity();
+    const api = (live.window as any).CLF_DOM;
+    const select = vi.fn(async () => true);
+    api.selectConnectorMention = select;
+    live.dom.reconfigure({ url: 'https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' });
+    live.document.querySelector('#prompt-textarea')!.textContent = 'different chat';
+
+    live.trustedClick(live.document.querySelector('[data-testid="send-button"]')!);
+    await settle();
+
+    expect(select).not.toHaveBeenCalled();
+  });
+});
+
 describe('the context meter and automatic compaction', () => {
   let live: Harness | null = null;
 

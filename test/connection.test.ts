@@ -39,6 +39,7 @@ const mocks = vi.hoisted(() => {
     tunnelStartReached: vi.fn(),
     optionalStartGate: null as Promise<void> | null,
     optionalStartReached: vi.fn(),
+    lifecycle: [] as string[],
     tunnelStop: vi.fn(async (): Promise<void> => undefined),
     secretGate: null as Promise<void> | null,
     secretReached: vi.fn()
@@ -84,6 +85,8 @@ vi.mock('../src/main/secrets.js', () => ({
 }));
 vi.mock('../src/main/tunnel/index.js', () => ({
   startTunnel: vi.fn(async (options: { label?: string; report: (report: Record<string, unknown>) => void }) => {
+    const label = options.label ?? 'core';
+    mocks.lifecycle.push(`start:${label}`);
     mocks.starts += 1;
     mocks.report = options.report;
     mocks.tunnelStartReached();
@@ -97,7 +100,7 @@ vi.mock('../src/main/tunnel/index.js', () => ({
       detail: 'Connected.',
       publicUrl: 'https://example.trycloudflare.com/mcp/core/core-token'
     });
-    return { stop: mocks.tunnelStop };
+    return { stop: async () => { mocks.lifecycle.push(`stop:${label}`); await mocks.tunnelStop(); } };
   })
 }));
 
@@ -114,6 +117,7 @@ describe('connection surface state', () => {
     mocks.tunnelStartGate = null;
     mocks.optionalStartGate = null;
     mocks.optionalStartReached.mockClear();
+    mocks.lifecycle.length = 0;
     mocks.tunnelStop.mockClear();
     mocks.secretReached.mockClear();
     mocks.secretGate = null;
@@ -136,6 +140,7 @@ describe('connection surface state', () => {
     mocks.config.readOnly = true;
     mocks.config.tunnel.kind = 'cloudflared';
     mocks.config.tunnel.tunnelId = '';
+    mocks.config.tunnel.desktopTunnelId = '';
     mocks.config.tunnel.pluginsTunnelId = '';
     mocks.config.tunnel.binaryPath = '';
     vi.resetModules();
@@ -175,6 +180,62 @@ describe('connection surface state', () => {
     expect(mocks.endpointStop).not.toHaveBeenCalled();
     oldReport({ state: 'error', detail: 'Retired failure', publicUrl: 'https://old.invalid' });
     expect(connection.getStatus().surfaces.find((s) => s.id === 'plugins')).toMatchObject({ state: 'live', detail: 'Connected.' });
+    await connection.disconnect();
+  });
+
+  it('keeps a legacy Plugins connector offline when it shares Core\'s Secure Tunnel ID', async () => {
+    mocks.config.tunnel.kind = 'openai';
+    mocks.config.tunnel.tunnelId = 'shared-test';
+    mocks.config.tunnel.pluginsTunnelId = 'shared-test';
+    const connection = await import('../src/main/connection.js');
+    await connection.connect();
+    try {
+      expect(mocks.lifecycle).toEqual(['start:core']);
+      expect(mocks.optionalStartReached).not.toHaveBeenCalled();
+      expect(connection.getStatus().surfaces.find(surface => surface.id === 'plugins')).toMatchObject({
+        state: 'error',
+        publicUrl: null
+      });
+      expect(connection.getStatus().surfaces.find(surface => surface.id === 'plugins')?.detail).toMatch(/same Secure Tunnel ID as Core/);
+    } finally {
+      await connection.disconnect();
+    }
+  });
+
+  it('gives Desktop precedence when legacy Desktop and Plugins ids collide', async () => {
+    mocks.config.tunnel.kind = 'openai';
+    mocks.config.tunnel.tunnelId = 'core-test';
+    mocks.config.tunnel.desktopTunnelId = 'shared-optional';
+    mocks.config.tunnel.pluginsTunnelId = 'shared-optional';
+    mocks.caps.screen = true;
+    const connection = await import('../src/main/connection.js');
+    await connection.connect();
+    try {
+      expect(mocks.lifecycle).toEqual(['start:core', 'start:desktop']);
+      expect(connection.getStatus().surfaces.find(surface => surface.id === 'desktop')?.state).toBe('live');
+      expect(connection.getStatus().surfaces.find(surface => surface.id === 'plugins')).toMatchObject({ state: 'error', publicUrl: null });
+      expect(connection.getStatus().surfaces.find(surface => surface.id === 'plugins')?.detail).toMatch(/same Secure Tunnel ID as Desktop/);
+    } finally {
+      await connection.disconnect();
+    }
+  });
+
+  it('stops both optional tunnel clients before starting a Desktop/Plugins id swap', async () => {
+    mocks.config.tunnel.kind = 'openai';
+    mocks.config.tunnel.tunnelId = 'core-test';
+    mocks.config.tunnel.desktopTunnelId = 'desktop-before';
+    mocks.config.tunnel.pluginsTunnelId = 'plugins-before';
+    mocks.caps.screen = true;
+    const connection = await import('../src/main/connection.js');
+    await connection.connect();
+    expect(mocks.lifecycle).toEqual(['start:core', 'start:desktop', 'start:plugins']);
+    mocks.lifecycle.length = 0;
+
+    mocks.config.tunnel.desktopTunnelId = 'plugins-before';
+    mocks.config.tunnel.pluginsTunnelId = 'desktop-before';
+    await connection.applySettings();
+
+    expect(mocks.lifecycle).toEqual(['stop:desktop', 'stop:plugins', 'start:desktop', 'start:plugins']);
     await connection.disconnect();
   });
   it('publishes refresh declarations only for live surfaces and does not rebuild on unchanged health reports', async () => {

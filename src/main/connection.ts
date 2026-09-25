@@ -35,6 +35,23 @@ const optionalTunnels = new Map<OptionalSurface, { handle: TunnelHandle | null; 
 const optionalSurfaces: OptionalSurface[] = ['desktop', 'plugins'];
 const optionalTunnelId = (settings: TunnelSettings, id: OptionalSurface): string =>
   (id === 'desktop' ? settings.desktopTunnelId : settings.pluginsTunnelId) ?? '';
+const surfaceLabel = (id: SurfaceId): string => id === 'core' ? 'Core' : id === 'desktop' ? 'Desktop' : 'Plugins';
+
+/** Earlier surfaces own a duplicated Secure Tunnel id; later optional clients must stay down. */
+function optionalTunnelConflict(id: OptionalSurface, settings: TunnelSettings): SurfaceId | null {
+  const wanted = optionalTunnelId(settings, id).trim();
+  if (!wanted) return null;
+  if (settings.tunnelId.trim() === wanted) return 'core';
+  if (id === 'plugins') {
+    const desktop = status.surfaces.find((surface) => surface.id === 'desktop');
+    if (desktop?.available && (settings.desktopTunnelId ?? '').trim() === wanted) return 'desktop';
+  }
+  return null;
+}
+
+function tunnelConflictDetail(id: OptionalSurface, conflict: SurfaceId): string {
+  return `${surfaceLabel(id)} is not published because it uses the same Secure Tunnel ID as ${surfaceLabel(conflict)}. Create a separate tunnel for each connector.`;
+}
 /** Core-affecting transport settings the current run actually started with. */
 let activeCoreTransport: Pick<TunnelSettings, 'kind' | 'tunnelId' | 'binaryPath' | 'profileEpoch'> | null = null;
 let status: ConnectionStatus = {
@@ -375,6 +392,13 @@ async function startOptionalTunnel(
     });
     return;
   }
+  const conflict = optionalTunnelConflict(id, settings);
+  if (conflict) {
+    const detail = tunnelConflictDetail(id, conflict);
+    logWarn(`${id} connector not published: Secure Tunnel ID conflicts with ${conflict}`);
+    updateSurface(id, { state: 'error', detail, publicUrl: null });
+    return;
+  }
 
   updateSurface(id, { state: 'starting', detail: 'Connecting…' });
   const lifetime = { handle: null as TunnelHandle | null, tunnelId };
@@ -463,15 +487,27 @@ async function applySettingsImpl(): Promise<void> {
     return;
   }
 
+  const restart: OptionalSurface[] = [];
   for (const id of optionalSurfaces) {
     if (!surfaceIsUseful(id, caps)) {
       await stopOptionalTunnel(id, 'Turn a desktop permission back on to publish this connector.');
       continue;
     }
+    const conflict = optionalTunnelConflict(id, config.tunnel);
+    if (conflict) {
+      await stopOptionalTunnel(id, tunnelConflictDetail(id, conflict));
+      updateSurface(id, { state: 'error', detail: tunnelConflictDetail(id, conflict), publicUrl: null });
+      continue;
+    }
     if (optionalTunnels.get(id)?.tunnelId === optionalTunnelId(config.tunnel, id)) continue;
-    await stopOptionalTunnel(id, 'Reconnecting with the new tunnel…');
-    await startOptionalTunnel(id, connectionGeneration, config.tunnel, await getSecret(setupApiKeySlot(config.tunnel.profileId)));
+    restart.push(id);
   }
+  // Retire every old optional client before starting any replacement. This matters when
+  // Desktop and Plugins swap ids: sequential stop/start would temporarily put the new Desktop
+  // client on the same shared queue as the still-running old Plugins client.
+  for (const id of restart) await stopOptionalTunnel(id, 'Reconnecting with the new tunnel…');
+  const apiKey = restart.length ? await getSecret(setupApiKeySlot(config.tunnel.profileId)) : null;
+  for (const id of restart) await startOptionalTunnel(id, connectionGeneration, config.tunnel, apiKey);
 }
 
 /** Applies a settings change to a live connection. Safe to call while disconnected. */
