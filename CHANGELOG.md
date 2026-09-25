@@ -18,6 +18,7 @@ the app refuses the extension and asks you to reload the matching copy.
 - Keep page-first request evidence pending until local admission instead of filing the first Core call under Unattributed activity.
 - Reject newly introduced duplicate Secure Tunnel IDs across available Core, Desktop and Plugins connectors, contain legacy conflicts at startup, and stop all affected optional clients before an ID swap can create a temporary shared queue.
 - Use `JeofW/chat-on-steroids` as the release, updater and companion-extension recovery channel while retaining the upstream app and connector names for compatibility.
+- Refresh the pinned OpenAI tunnel-client to v0.0.15 across all six release targets before publishing.
 
 Reload the companion extension and refresh the affected CoS connectors in ChatGPT after updating.
 
