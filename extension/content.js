@@ -3214,6 +3214,7 @@
       app: cap(raw.app, 200),
       resource: cap(raw.resource, 200),
       messageId: cap(raw.messageId, 200),
+      requestId: cap(raw.requestId, 100) || null,
       turnId: cap(raw.turnId, 200),
       conversationId: cap(raw.conversationId, 200),
       createTime: typeof raw.createTime === 'number' && Number.isFinite(raw.createTime) ? raw.createTime : null,
@@ -3978,15 +3979,7 @@
     // that an object belongs to this tab: marking `read` while parsing was the reason the popup
     // could show a request id as picked up even though refreshFiber() then discarded it before
     // the app ever saw it.
-    const acceptedCalls = answer.turns.flatMap((turn) => turn.calls || []);
-    observed.calls = acceptedCalls.length;
-    for (const call of acceptedCalls) {
-      if (!call.requestId) continue;
-      traceStage(call.requestId, 'read');
-      traceStage(call.requestId, 'tool', call.tool);
-    }
     fiberPresent = true;
-    fiberRows = answer.rows;
     fiberScanToken = answer.scanToken;
     const previousFiberTurns = [...fiberTurns.values()];
     fiberTurns = new Map();
@@ -4080,16 +4073,26 @@
       // chat. Do not let the ordinary fire-and-forget tool_evidence path race ahead of that
       // verdict: it would re-assert the URL conversation, bypass a rejected handshake and turn
       // an already-proven request owner into a sticky conflict.
-      const ownedPageConversation = ownedPageTurn ? concreteConversation(ownedPageTurn.conversationId) : null;
-      if (ownedPageTurn && (ownedPageTurn.requestOwnerRequired ||
-          ownedPageConversation && ownedPageConversation !== askedConversation)) {
+      if (ownerCalls.length > 0) {
         await ownerConfirmation;
-        // The ownership read-back added a new async boundary to this scan. Re-prove the same
-        // document/route before any observation from the pre-await Fiber frame can be emitted.
+        // Ownership confirmation is an async boundary for every connector name. Re-prove the
+        // same document/route before page candidates can affect presentation or recording.
         if (epoch !== askedEpoch || conversationId !== askedConversation) return;
         if (CLF_DOM.conversationId() !== askedConversation) return;
       }
     }
+    // A connector label is never ownership. Rows and tool diagnostics become ours only after
+    // the app has matched their opaque request id to an actual local MCP ingress.
+    const ownedCalls = answer.turns.flatMap((turn) => turn.calls || []).filter((call) =>
+      call.requestId && requestOwnersConfirmed.get(call.requestId) === askedConversation);
+    observed.calls = ownedCalls.length;
+    for (const call of ownedCalls) {
+      traceStage(call.requestId, 'read');
+      traceStage(call.requestId, 'tool', call.tool);
+    }
+    // Row descriptors remain untrusted candidates. coveredNativeBlocks() spends them only
+    // against exact request-id/tool/cardinality facts returned by the local recorder.
+    fiberRows = answer.rows;
     // A terminal message can finish the local turn before ChatGPT removes a stale Stop
     // control. While that latch is active, observe() keeps Fiber probing the newest visible
     // page turn. If Retry/Regenerate produces a newer public website message, the descriptor's
@@ -4102,22 +4105,8 @@
     }
     for (let index = 0; index < answer.turns.length; index++) {
       const turn = answer.turns[index];
-      const pageConversation = concreteConversation(turn.conversationId);
-      const provisionalOwnedTurn = turn.requestOwnerRequired || Boolean(
-        turn === ownedPageTurn &&
-        askedConversation &&
-        pageConversation &&
-        pageConversation !== askedConversation
-      );
       const fresh = turn.calls.filter((call) => {
-        // A mismatched owned turn is admissible only as a provisional-first-turn candidate.
-        // Its request id must have survived the app's explicit owner read-back before the
-        // transcript channel may repeat that evidence. A rejected/stale id is simply omitted;
-        // the already-proven owner remains authoritative and no sticky conflict is manufactured.
-        if (
-          provisionalOwnedTurn &&
-          (!call.requestId || requestOwnersConfirmed.get(call.requestId) !== askedConversation)
-        ) return false;
+        if (!call.requestId || requestOwnersConfirmed.get(call.requestId) !== askedConversation) return false;
         const owner = index === activeTurnIndex ? activeLocalTurnId || '' : '';
         const signature = `${call.tool}\u0000${call.requestId || ''}\u0000${call.answered ? '1' : '0'}\u0000${owner}`;
         if (callsReported.get(call.messageId) === signature) return false;
@@ -5623,39 +5612,6 @@
   }
 
   /**
-   * Whether a Fiber descriptor names one of *this* app's connectors.
-   *
-   * Kept in one place because getting it wrong is silent and total: 1.7.1 split the model
-   * surface into a Core and a Desktop connector, and while this test still spelled the
-   * single pre-1.7.1 name, no descriptor on any page matched it. Every call then looked
-   * like a stranger's — so it produced no attribution evidence and, worse, local rows were
-   * classified as ChatGPT-native activity and re-recorded as the assistant's own captions.
-   * `app_name` comes from the protected-resource metadata this app serves, not from what
-   * the user typed into ChatGPT, so these are this app naming itself.
-   *
-   * Exact names, never a prefix: `Chat On Steroids Backup` would be somebody else's
-   * connector, and a prefix test would have this app vouch for its traffic.
-   */
-  const OUR_CONNECTORS = [
-    'Chat On Steroids Core',
-    'Chat On Steroids Desktop',
-    'Chat On Steroids Plugins',
-    'TobisComputer'
-  ];
-
-  function ourConnectorApp(name) {
-    return typeof name === 'string' && OUR_CONNECTORS.includes(name);
-  }
-
-  function ourConnectorSeen(seen) {
-    if (!seen) return false;
-    if (ourConnectorApp(seen.app)) return true;
-    if (typeof seen.path !== 'string' || !seen.path.startsWith('/')) return false;
-    const end = seen.path.indexOf('/', 1);
-    return end > 1 && ourConnectorApp(seen.path.slice(1, end));
-  }
-
-  /**
    * One visible turn whose viewport position should survive an idle Overwrite repaint.
    *
    * Prefer a user turn: Overwrite mutates assistant sections only, so the user's question is
@@ -5860,7 +5816,7 @@
     const covered = [];
     for (const block of CLF_DOM.toolBlocks(turn)) {
       const row = fiberFor(block);
-      if (!row || row.answered !== true || !ourConnectorSeen(row) || !row.messageId) continue;
+      if (!row || row.answered !== true || !row.requestId || !row.messageId) continue;
       const exact = callsByMessage.get(row.messageId) || [];
       if (exact.length !== 1 || exact[0].answered !== true || !exact[0].requestId || row.tool !== exact[0].tool) continue;
       const key = callKey(exact[0]);
